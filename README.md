@@ -1,1 +1,1 @@
-# R
+Statistical modelling projects in R.
