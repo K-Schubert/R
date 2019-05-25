@@ -1,0 +1,1915 @@
+---
+title: "Machine Learning: data competition"
+subtitle: "Document 2"
+author: "Samuel Colin"
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: 3
+  html_notebook: 
+    toc: true
+    toc_depth: 3
+#bibliography: "Bib/references.bib"
+---
+
+
+# Introduction
+
+## To do
+
+Things to do:
+
+  - Comments Engelke (from ridgre regression)
+  - General comments Engelke
+
+## Author
+
+Samuel Colin.
+
+## Goal
+
+The goal of this document is to start the data competition from a clean basis. We will use the submitted r code as a basis for the syntax.
+
+Note that we will focus in particular on using the following packages (families):
+
+  - tidyverse: for data manipulation
+  - tidymodels: for making the modelling process clean, in particular the output and the predictions
+  - caret: to standardize the modelling
+  
+More informations can be found here:
+
+  - 
+
+## Inputs
+
+Data from the data competition. Namely:
+
+  - Training data set
+  - Test data
+  - Sample submission
+
+## Outputs
+
+
+
+## Reset
+
+This command removes all objects from the object space.
+
+```{r}
+rm(list = ls()) 
+```
+
+## Seed
+
+```{r}
+set.seed(12345)
+```
+
+## Libraries
+
+Libraries/packages which are used in this project.
+
+```{r}
+library("tidymodels")
+library("tidyverse")
+library("magrittr")
+library("GGally")
+library("caret")
+library("glmnet")
+library("gridExtra")
+library("randomForest")
+library("rpart")
+library("mgcv")
+library("knitr")
+library("gbm")
+```
+
+## Functions and other sources
+
+```{r}
+source("Scripts/CV_gam.R")
+source("Scripts/StepGam.R")
+```
+
+
+
+# Initial data preparation
+
+## Import data
+
+Loading
+```{r}
+train <- read_csv("Data/trainingdata.csv")
+test <- read_csv("Data/test_predictors.csv")
+SampleSubmission <- read_csv("Data/SampleSubmission.csv")
+```
+
+## Exploratory data analysis
+
+Graphical inspection of the response variable (unscaled)
+```{r}
+pdf(file = "Pict/y_descriptive.pdf", width=9, height=5)
+par(mfrow = c(2, 2))
+plot(train$y, type = "l", 
+     main = "y (unscaled) vs index", 
+     ylab = "Number of sandwiches")
+hist(train$y, 
+     main = "Histogram of y",
+     xlab = "Number of sandwiches sold",
+     ylab = "Number of days")
+plot(density(train$y), 
+     main = "Kernel density of y",
+     xlab = "Number of sandwiches sold")
+qqnorm(train$y, main = "Normal QQ-plot of y")
+qqline(train$y, col = "red")
+dev.off()
+```
+
+Bivariate analysis between y and X60 and X62
+```{r}
+#dev.new()
+#x11()
+pdf(file = "Pict/y_x60_x62.pdf", width=9, height=5)
+par(mfrow = c(1,2))
+plot(train[,c(61,1)], 
+     main = "y vs X60")
+plot(train[,c(63,1)], 
+     main = "y vs X62")
+dev.off()
+```
+
+Try to see if this dependance is significant
+```{r}
+mod <- lm(y ~ X60 + X62, data = train) #NOT STANDARDIZED
+summary(mod)
+```
+
+
+
+## Data transformation
+
+Count of distinct values
+```{r}
+train_f <- train %>% lapply(as.factor) %>% as_tibble()
+lev <- train_f %>% lapply(levels)
+ct_lev <- lev %>% lapply(length) %>% unlist
+ct_lev
+
+```
+
+Histogram
+```{r}
+pdf(file = "Pict/hist_ct_lev.pdf", width=9, height=5)
+ct_lev %>% hist(nclass = 30,
+                main = "Number of variables per number of distinct level",
+                xlab = "Number of distinct values", 
+                ylab = "Number of variables")
+dev.off()
+```
+
+Consider some variables as factor
+```{r}
+train_tr <- train
+var_asfact <- ct_lev < 13
+train_tr[, var_asfact] <- train_tr[, var_asfact] %>% lapply(as.factor)
+```
+
+Control the results of the transformation
+```{r}
+#train_tr %>% str()
+#var_asfact %>% sum()
+```
+
+Standardize the numeric data
+```{r}
+var_asnum <- train_tr %>% lapply(is.numeric) %>% unlist
+var_asnum[1] <- FALSE # don't modify y
+var_asnum
+train_tr[, var_asnum] <- train_tr[, var_asnum] %>% lapply(scale)
+
+## Control the result
+#train_tr[, var_asnum] %>% lapply(mean) %>% unlist
+#train_tr[, var_asnum] %>% lapply(sd) %>% unlist
+```
+
+Same manipulation to the test data set
+```{r}
+test_tr <- test
+test_tr[, var_asfact] <- test_tr[, var_asfact] %>% lapply(as.factor)
+test_tr[, var_asnum] <- test_tr[, var_asnum] %>% lapply(scale)
+
+## Check the result
+#test_tr %>% summary()
+```
+
+# Linear modelling
+
+## Naive full lm
+
+Redo a full lm using caret
+```{r}
+# Use classical lm
+nm <- names(train_tr)
+eq <- paste(nm[1], "~", paste(nm[-1], collapse = " + "))
+lm_all_lm <- lm(eq, data = train_tr)
+#lm_all_lm %>% glance
+
+# Use caret for lm 
+set.seed(1)
+lm_all_caret <- caret::train(
+  x = train_tr %>% select(-y),  # the predictors
+  y = train_tr$y,  # the response
+  method = "lm",  # the family of models to use
+  metric = "RMSE",  # the loss function / metric
+  trControl = trainControl(  # the validation procedure
+    method = "cv",
+    number = 10
+  )
+)
+
+# Tidy results
+lm_all_caret$finalModel %>% glance()
+
+# CV-error
+lm_all_caret$results$RMSE
+
+# It seems that we have the same result. Let's control with bind_rows
+#bind_rows(lm_all_lm %>% glance,
+#          lm_all_caret$finalModel %>% glance())
+```
+All right.
+
+CV-error: 120.73
+
+Leatherboard: 122.32
+
+Save the predictions using the classical syntax:
+```{r}
+pred_lm_all_lm <- tibble(ID = 1:350, y = predict(lm_all_lm, newdata = test_tr))
+write.csv(pred_lm_all_lm, "Predictions/pred_lm_all_lm.csv", row.names = FALSE)
+```
+
+Store results in result table
+```{r}
+sumTable_lm_all <- data.frame(model = "Full linear model",  p = 111, cv_error = 120.73, leaderboard = 122.32)
+```
+
+
+## Ridge regression
+
+The regression itself
+```{r}
+y <- train_tr$y
+grid <- 10^seq(10, -2, length = 100)
+ridge.mod <- glmnet(as.matrix(train_tr[,-1]), y, alpha = 0, lambda = grid,
+                    standardize = TRUE)
+```
+
+Print result
+```{r}
+#dev.new()
+pdf(file = "Pict/ridge_1.pdf", width=9, height=5)
+par(mfrow = c(1,2))
+plot(ridge.mod)
+cv.ridge <- cv.glmnet(x = data.matrix(train_tr[,-1]), y , alpha = 0, nfolds = 10)
+plot(cv.ridge)
+dev.off()
+```
+
+fit optimal lambda of rige model
+```{r}
+opt_lambda <- cv.ridge$lambda.1se
+opt_lambda 
+fit <- cv.ridge$glmnet.fit
+y_predicted <- predict(fit, s = opt_lambda, newx = data.matrix(train_tr[,-1]))
+```
+
+compute the R2
+```{r}
+sst <- sum((y - mean(y))^2)
+sse <- sum((y_predicted - y)^2)
+rsq_ridge <- 1 - sse / sst
+rsq_ridge ##R squared of ridge model
+
+RMSE_GEN <- function(error) {
+  sqrt(mean(error^2))
+}
+ridge_rmse <- RMSE_GEN(y_predicted-y)
+ridge_rmse
+
+
+```
+
+Save the predictions
+```{r}
+pred_ridge_1 <- 
+  tibble(ID = 1:350, y = predict(fit, s = opt_lambda, 
+                                 newx = data.matrix(test_tr[, -1])))
+write.csv(pred_ridge_1, "Predictions/pred_ridge_1.csv", row.names = FALSE)
+
+```
+
+```{r}
+sumTable_ridge <- data.frame(model = "Ridge",  p = 111, cv_error = 82.67, leaderboard = 100.26)
+```
+
+## Lasso (manual, previous)
+
+```{r}
+### Lasso regression
+y <- train_tr$y
+lasso.mod <- glmnet(data.matrix(train_tr[,-1]), y, alpha = 1, lambda = grid,
+                     standardize = TRUE)
+ 
+### Print results
+pdf(file = "Pict/lasso_1.pdf", width=9, height=5)
+par(mfrow = c(1,2))
+plot(lasso.mod)
+cv.lasso <- cv.glmnet(data.matrix(train_tr[,-1]), y, alpha = 1, nfolds = 10)
+plot(cv.lasso)
+dev.off(9)
+ 
+### fit Optimal lambda in lasso model
+opt_lambda <- cv.lasso$lambda.1se
+opt_lambda 
+fit <- cv.lasso$glmnet.fit
+y_predicted <- predict(fit, s = opt_lambda, newx = data.matrix(train_tr[,-1]))
+ 
+### compute the R2
+sst <- sum((y - mean(y))^2)
+sse <- sum((y_predicted - y)^2)
+rsq_lasso <- 1 - sse / sst
+rsq_lasso
+ 
+## Save the predictions
+pred_lasso_1 <- 
+ tibble(ID = 1:350, y = predict(fit, s = opt_lambda, 
+                                newx = data.matrix(test_tr[, -1])))
+write.csv(pred_lasso_1, "Predictions/pred_lasso_1.csv", row.names = FALSE)
+```
+
+
+## Lasso (caret)
+```{r lasso}
+set.seed(1)
+trn <- read.csv("Data/trainingdata.csv", header=T)
+test <- read.csv("Data/test_predictors.csv", header=T)
+X <- trn[,-1]
+y <- trn[,1]
+grid <- 10^seq(10, -2, length = 100)
+lasso_caret <- caret::train(X,y, method = "glmnet", lambda= 0,
+                            tuneGrid = expand.grid(alpha = 1,  lambda = grid))
+cv.lasso <- cv.glmnet(data.matrix(X), y, alpha = 1, nfolds = 10)
+CV_errLasso <- 
+co <- coef(cv.lasso,s = "lambda.1se")
+inds <- which(co!=0)
+subset_lasso <- row.names(co)[inds]
+```
+
+Display results:
+```{r lasso results}
+#subset_lasso
+```
+
+Plot results
+```{r}
+# TO ADAPT
+#pdf(file = "Pict/lasso_1.pdf", width=9, height=5)
+#par(mfrow = c(1,2))
+#plot(lasso.mod)
+#cv.lasso <- cv.glmnet(data.matrix(train_tr[,-1]), y, alpha = 1, nfolds = 10)
+#plot(cv.lasso)
+# dev.off()
+```
+
+Compute error
+```{r}
+#lasso_caret_predtrain <- predict(lasso_caret)
+#lasso_caret_rmse <- RMSE(pred = lasso_caret_predtrain, obs = train_tr$y)
+#lasso_caret_rmse
+```
+
+We see the lasso method selects 8 variables.
+
+The RMSE is 72.17375.
+
+```{r}
+sumTable_lasso_caret <- data.frame(model = "Lasso",  p = 8, cv_error = 72.17, leaderboard = 88.75)
+```
+
+# kNN
+
+try a knn with 10 folds keeping all the variables
+```{r}
+# Use caret
+set.seed(1)
+kmax <- train_tr %>% ncol() - 1
+knn_caret <- caret::train(
+  x = train_tr %>% select(-y),  # the predictors
+  y = train_tr$y,  # the response
+  method = "knn",  # the family of models to use
+  metric = "RMSE",  # the loss function / metric
+  tuneGrid = expand.grid(k = 1:kmax),  # range of tuning parameter  
+  trControl = trainControl(
+    method = "cv", 
+    number = 10,  # Nr of folds
+    selectionFunction = "oneSE"  # use the one SE rule
+  )  
+)
+
+# Tidy results
+knn_caret$finalModel #%>% glance()
+```
+
+Now, let's examine the properties of this model
+```{r}
+knn_caret
+knn_caret_final <- knn_caret$finalModel
+knn_caret_final$tuneValue
+knn_caret_final
+```
+
+We see that, according to our 10 folds CV with 1SE rule and all the predictors, the optimal k = 22. Plot the Cross-validation chart:
+```{r}
+K <- 10
+pl <- ggplot(knn_caret$results %>% filter(k < 65), aes(x = k, y = RMSE))
+pl <- pl + geom_point(alpha = 0.3) + geom_line()
+pl <- pl + geom_errorbar(aes(
+  ymin = RMSE - (RMSESD / sqrt(K)),
+  ymax = RMSE + (RMSESD / sqrt(K))
+))
+id_minCV <- knn_caret$results$RMSE %>% which.min()
+minCV <- knn_caret$results$RMSE[id_minCV]
+minCV_SE <- knn_caret$results$RMSESD[id_minCV] / sqrt(K)
+pl <- pl + geom_hline(aes(yintercept = minCV + minCV_SE, col = "blue"))
+pl <- pl + geom_hline(aes(yintercept = minCV, col = "red"))
+
+pl <- pl + labs(x = "Number of neighbours", y = "CV-error", col = NULL)
+pl <- pl + scale_color_discrete(labels = c("One standard error rule limit", "Minimal CV-error"))
+knn_caret_cvplot <- pl
+knn_caret_cvplot
+ggsave("Pict/knn_caret_CV.pdf", pl, width = 7, height = 3.5)
+```
+
+
+Compute the root-mse
+```{r}
+knn_caret_predtrain <- predict(knn_caret)
+#knn_caret_rmse <- RMSE(pred = knn_caret_predtrain, obs = train_tr$y)
+#knn_caret_rmse
+knn_caret$results %>% filter(k == 22)
+```
+
+We obtain a CV-error of 156.5658, which indicates that it is not precise enough.
+
+Now, let's see which predictions we get with the final model:
+```{r}
+pred_knn_caret <- tibble(ID = 1:350, y = predict(knn_caret, newdata = test_tr))
+write.csv(pred_knn_caret, "Predictions/pred_knn_caret.csv", row.names = FALSE)
+```
+
+The score obtained is: 154.64261 (submission of the 16.05.2019 instead of 23.04.2019).
+
+Store results in result table
+```{r}
+sumTable_knn_caret <- data.frame(model = "Full kNN",  p = 111, cv_error = 156.57, leaderboard = 154.64)
+```
+
+
+# Intercept-only model
+
+Let's fit an intercept-only model:
+```{r}
+# Use caret
+set.seed(1)
+intercept_caret <- nullModel(
+  y = train_tr$y, 
+  metric = "RMSE",  # the loss function / metric
+  trControl = trainControl(
+    method = "cv", 
+    number = 10,  # Nr of folds
+    selectionFunction = "oneSE"  # use the one SE rule
+  )
+)
+
+# Tidy results
+intercept_caret
+
+# Results of CV
+intercept_caret
+```
+
+We observe that we have a predicted value 447.6057
+
+The RMSE is 197.3569
+```{r}
+intercept_caret_predtrain <- predict(intercept_caret)
+intercept_caret_rmse <- RMSE(pred = intercept_caret_predtrain, obs = train_tr$y)
+intercept_caret_rmse
+```
+
+
+Let's make predictions:
+```{r}
+pred_intercept_caret <- tibble(ID = 1:350, y = predict(intercept_caret, newdata = test_tr))
+write.csv(pred_intercept_caret, "Predictions/pred_intercept_caret.csv", row.names = FALSE)
+```
+
+We obtain a score of 199.83436 (submission of the 24.04.2019).
+
+Store results in result table
+```{r}
+sumTable_intercept <- data.frame(model = "Intercept-only model",  p = 0, cv_error = 197.36, leaderboard = 199.83)
+```
+
+
+# Tree models
+
+## single regression tree
+
+Let's make a single regression tree using CV 10-folds to select the best number of nodes
+```{r}
+# Use caret
+set.seed(2)
+library("rpart")
+singletree_caret <- caret::train(
+  # Predictors and response
+  x = train_tr %>% select(-y),
+  y = train_tr$y,
+  # Model family
+  method = "rpart2",  # the family of models to use
+  # Loss function
+  metric = "RMSE",  # the loss function / metric
+  # Grid for tuning parameter
+  tuneGrid = expand.grid(maxdepth = 1:100), # allow for max 100 nodes
+  # Aditional options specific to tree
+  control =  rpart.control(minsplit = 10, # min nobs so that split attempt
+                           minbucket = 5), # min nobs in terminal node
+  # Cross-validation
+  trControl = trainControl(
+    method = "cv", 
+    number = 10,  # Nr of folds
+    selectionFunction = "oneSE"  # use the one SE rule and not best
+  )
+)
+
+# Tidy results
+singletree_caret
+```
+
+The final value used is maxdepth = 6.
+
+Note that the optimal model is maxdepth = 11
+
+Display the tree:
+```{r}
+singletree_caret$finalModel %>% plot()
+singletree_caret$finalModel %>% text()
+```
+
+
+Plot the results of the CV
+```{r}
+ggplot(singletree_caret, plotType = "scatter", highlight = TRUE)
+```
+
+
+
+With the 1SE rule:
+```{r}
+pl <- ggplot(singletree_caret$results %>% filter(maxdepth < 25),
+             aes(x = maxdepth, y = RMSE))
+pl <- pl + geom_point(alpha = 0.2)
+pl <- pl + geom_line(alpha = 0.5)
+pl <- pl + geom_errorbar(aes(
+  ymin = RMSE - (RMSESD / sqrt(10)),
+  ymax = RMSE + (RMSESD / sqrt(10))
+  ))
+id_minCV <- singletree_caret$results$RMSE %>% which.min()
+minCV <- singletree_caret$results$RMSE[id_minCV]
+minCV_SE <- singletree_caret$results$RMSESD[id_minCV] / sqrt(K)
+pl <- pl + geom_hline(aes(yintercept = minCV + minCV_SE, col = "blue"))
+pl <- pl + geom_hline(aes(yintercept = minCV, col = "red"))
+pl <- pl + labs(x = "Maximal depth allowed", y = "CV-error", col = NULL)
+pl <- pl + scale_color_discrete(labels = c("One standard error rule limit", "Minimal CV-error"))
+pl
+ggsave("Pict/singletree_caret_CV.pdf", pl, width = 7, height = 3.5)
+```
+
+CV-error
+```{r}
+singletree_caret$results %>% filter(maxdepth == 6)
+```
+103.60
+
+Compute the root-mse
+```{r}
+singletree_caret_predtrain <- predict(singletree_caret)
+singletree_caret_rmse <- RMSE(pred = singletree_caret_predtrain, obs = train_tr$y)
+singletree_caret_rmse
+```
+
+RMSE: 73.97789
+
+Now, use this model to make predictions:
+```{r}
+pred_singletree_caret <- tibble(ID = 1:350, y = predict(singletree_caret, newdata = test_tr))
+write.csv(pred_singletree_caret, "Predictions/pred_singletree_caret.csv", row.names = FALSE)
+```
+
+The score is the following: 92.24640
+
+Let's select the variables used in the final tree:
+```{r}
+subset_tree <- singletree_caret$finalModel$frame$var  # extract all branches used
+subset_tree <- subset_tree[!(subset_tree %in% "<leaf>")]  # remove leaves
+subset_tree <- unique(subset_tree)
+subset_tree <- subset_tree %>% as.character()
+subset_tree
+```
+
+Number of parameters
+```{r}
+subset_tree %>% length()
+```
+
+Reference: https://stackoverflow.com/questions/18302628/used-variables-in-tree
+
+Store results in result table
+```{r}
+sumTable_singletree <- data.frame(model = "Single regression tree",  p = 7, cv_error = 103.60, leaderboard = 92.25)
+```
+
+
+## Bagging
+
+```{r baggin on the training set}
+set.seed(1)
+B <- 1000
+pred <- matrix(0, nrow=nrow(train_tr), ncol=B)
+
+for (b in 1:B){
+  ind <- sample(nrow(train_tr), nrow(train_tr), replace=T)
+  mod <- lm(y~., data=slice(train_tr, ind))
+  pred[, b] <- predict(mod, newdata=train_tr)
+}
+
+bagged_pred <- rowSums(pred)/B
+
+#bagged_pred
+
+pred_bag <- tibble(ID = 1:350, y = bagged_pred)
+write.csv(pred_bag, "Predictions/pred_bag_full_lm.csv", row.names = FALSE)
+```
+
+Compute the root-mse
+```{r}
+RMSE_GEN <- function(error) {
+  sqrt(mean(error^2))
+}
+bag_rmse <- RMSE_GEN(bagged_pred-train_tr$y)
+bag_rmse
+```
+
+Training RMSE: 
+The score is the following: 226.89
+
+```{r sumTable_bag1}
+sumTable_bag1 <- data.frame(model = "Bagging Model 1",  p = 111, cv_error = 49.52, leaderboard = 226.89)
+```
+
+
+```{r bagging regression tree with subset}
+set.seed(1)
+B <- 1000
+y <- train_tr$y
+pred <- matrix(0, nrow=nrow(train_tr), ncol=B)
+
+for (b in 1:B){
+  ind <- sample(nrow(train_tr), nrow(train_tr), replace=T)
+  mod <- rpart(y~X60+X35+X75+X19+X104+X34+X59, 
+               method="anova", data=slice(train_tr, ind))
+  pred[, b] <- predict(mod, newdata=test_tr)
+}
+
+bagged_pred <- rowSums(pred)/B
+pred_bag <- tibble(ID = 1:350, y = bagged_pred)
+write.csv(pred_bag, "Predictions/pred_bag.csv", row.names = FALSE)
+#bagged_pred
+```
+
+Compute the root-mse
+```{r}
+RMSE_GEN <- function(error) {
+  sqrt(mean(error^2))
+}
+bag_rmse <- RMSE_GEN(bagged_pred-y)
+bag_rmse
+```
+
+Training RMSE: 196.7413
+The score is the following: 215.89523
+
+```{r}
+sumTable_bag2 <- data.frame(model = "Bagging Model 2",  p = 7, cv_error = 197.34, leaderboard = 215.89)
+```
+
+```{r bagging CV optimal B}
+set.seed(42)
+k <- 10
+
+cv <- function(trn, k){
+  trn_shuffled <- trn[sample(nrow(trn)),]
+  folds <- cut(seq(1,nrow(trn_shuffled)),breaks=k,labels=FALSE)
+  CV_MSE <- rep(0, 10)
+  SE <- rep(0, 10)
+  boot <- 0
+  
+  for (b in seq(100,1000,by=100)){
+    boot <- boot + 1
+    MSE <- rep(0, k)
+    for (i in 1:k){
+      test_ind <- which(folds==i,arr.ind=TRUE)
+      testData <- trn_shuffled[test_ind, ]
+      trainData <- trn_shuffled[-test_ind, ]
+      
+      ########
+      #BAGGING
+      B <- b
+      pred <- matrix(0, nrow=nrow(testData), ncol=B)
+      
+      for (b in 1:B){
+        ind <- sample(nrow(trainData), nrow(trainData), replace=T)
+        mod <- rpart(slice(trainData, ind), method="anova")
+        pred[, b] <- predict(mod, newdata=testData)
+      }
+      
+      bagged_pred_fold <- rowSums(pred)/B
+      ########
+      
+      MSE[i] <- (k/nrow(trn))*sum((bagged_pred_fold-testData$y)^2)
+    }
+    CV_MSE[boot] <- (1/k)*sum(MSE)
+    SE[boot] <- (1/sqrt(k))*sqrt(sum((MSE-CV_MSE[boot])^2)/(k-1))
+  }
+  data <- list(mse = MSE, cv_mse = CV_MSE, se = SE)
+  return(data)
+}
+
+a <- cv(train_tr, k)
+CV_MSE <- a$cv_mse
+SE <- a$se
+
+
+pdf("Pict/Bagging_CV_RMSE_B.pdf", height=4, width=8)
+plot(seq(100,1000,by=100), sqrt(CV_MSE), ylim=c(91, 93), ylab="CV RMSE", xlab="B", main="CV RMSE of Bagging models as a function of B", type="o")
+points(400, min(sqrt(CV_MSE)), col="red", cex=2)
+dev.off()
+```
+
+## Random Forest
+
+We use the Random Forest method with q = 37 predictors for each tree (~p/3) and 500 trees.
+```{r}
+set.seed(1)
+rf_mod <- randomForest(y~., data=train_tr, mtry=37, importance=T, na.action=na.omit)
+rf_pred <- predict(rf_mod, newdata=test_tr)
+pred_rf <- tibble(ID = 1:350, y = rf_pred)
+write.csv(pred_rf, "Predictions/pred_rf.csv", row.names = FALSE)
+```
+
+Compute the root-mse
+```{r}
+rf_rmse <- RMSE_GEN(rf_pred - y)
+rf_rmse
+```
+
+RMSE: 91.38916
+The score is the following: 75.21
+
+###Random Forest Variable Importance
+```{r}
+pdf("Pict/Variable_Importance.pdf", height=5, width=10)
+barplot(sort(importance(rf_mod, type=2)), horiz=T, names.arg=colnames(train_tr)[-1], main="Variable Importance")
+dev.off()
+pdf("Pict/Variable_Importance2.pdf", height=5, width=10)
+#plot(sort(importance(rf_mod, type=2)))
+varImpPlot(rf_mod,main="Important variables", n.var=8, sort=T)
+dev.off()
+```
+
+```{r}
+sumTable_rf1 <- data.frame(model = "RF Model 1",  p = 37, cv_error = 91.39, leaderboard = 75.21)
+```
+
+```{r CV for optimal m}
+
+
+set.seed(42)
+k <- 10
+
+cv <- function(trn, k){
+  trn_shuffled <- trn[sample(nrow(trn)),]
+  folds <- cut(seq(1,nrow(trn_shuffled)),breaks=k,labels=FALSE)
+  CV_MSE <- rep(0, 22)
+  SE <- rep(0, 22)
+  h <- 0
+  
+  for (m in seq(5, ncol(trn)-1, by=5)){
+    h <- h + 1
+    MSE <- rep(0, k)
+    for (i in 1:k){
+      test_ind <- which(folds==i,arr.ind=TRUE)
+      testData <- trn_shuffled[test_ind, ]
+      trainData <- trn_shuffled[-test_ind, ]
+      
+      ########
+      #RF
+      rf_mod <- randomForest(y~., data=trainData, mtry=m, importance=F, na.action=na.omit)
+      rf_pred <- predict(rf_mod, newdata=testData)
+      ########
+     
+      MSE[i] <- (k/nrow(trn))*sum((rf_pred-testData$y)^2)
+    }
+    CV_MSE[h] <- (1/k)*sum(MSE)
+    SE[h] <- (1/sqrt(k))*sqrt(sum((MSE-CV_MSE[h])^2)/(k-1))
+  }
+  data <- list(mse = MSE, cv_mse = CV_MSE, se = SE)
+  return(data)
+}
+
+a <- cv(train_tr, k)
+CV_MSE <- a$cv_mse
+SE <- a$se
+
+
+pdf("Pict/RF_CV_RMSE_m.pdf", height=4, width=8)
+plot(seq(5,111,by=5), sqrt(CV_MSE), ylab="CV RMSE", xlab="m", main="CV RMSE of RF models as a function of m (ntree=500)", type="o")
+points(70, min(sqrt(CV_MSE)), col="red", cex=2)
+dev.off()
+```
+
+```{r CV for optimal ntree}
+set.seed(42)
+k <- 10
+
+cv <- function(trn, k){
+  trn_shuffled <- trn[sample(nrow(trn)),]
+  folds <- cut(seq(1,nrow(trn_shuffled)),breaks=k,labels=FALSE)
+  CV_MSE <- rep(0, 20)
+  SE <- rep(0, 20)
+  h <- 0
+  
+  for (n in seq(50, 1000, by=50)){
+    h <- h + 1
+    MSE <- rep(0, k)
+    for (i in 1:k){
+      test_ind <- which(folds==i,arr.ind=TRUE)
+      testData <- trn_shuffled[test_ind, ]
+      trainData <- trn_shuffled[-test_ind, ]
+      
+      ########
+      #RF
+      rf_mod <- randomForest(y~., data=trainData, mtry=70, ntree=n, importance=F, na.action=na.omit)
+      rf_pred <- predict(rf_mod, newdata=testData)
+      ########
+      
+      MSE[i] <- (k/nrow(trn))*sum((rf_pred-testData$y)^2)
+    }
+    CV_MSE[h] <- (1/k)*sum(MSE)
+    SE[h] <- (1/sqrt(k))*sqrt(sum((MSE-CV_MSE[h])^2)/(k-1))
+  }
+  data <- list(mse = MSE, cv_mse = CV_MSE, se = SE)
+  return(data)
+}
+
+a <- cv(train_tr, k)
+CV_MSE <- a$cv_mse
+SE <- a$se
+
+pdf("Pict/RF_CV_RMSE_ntree.pdf", height=4, width=8)
+plot(seq(50, 1000, by=50), sqrt(CV_MSE), ylab="CV RMSE", xlab="ntree", main="CV RMSE of RF models as a function of ntree (m=70)", type="o")
+points(550, min(sqrt(CV_MSE)), col="red", cex=2)
+dev.off()
+```
+
+
+```{r}
+sumTable_rf2 <- data.frame(model = "RF Model 2",  p = 60, cv_error = 89.01, leaderboard = 83.10)
+```
+
+```{r}
+sumTable_rf3 <- data.frame(model = "RF Model 3",  p = 105, cv_error = 89.31, leaderboard = 83.77)
+```
+
+## Boosting
+
+```{r}
+#Need to set correct wd in Boosting_gbm.R file (1st line)
+source(Boosting_gbm)
+```
+
+Selected features
+```{r}
+man_features_boosting <- c("X32", "X34", "X35", "X55", "X59", "X60", "X62", "X68", "X75", "X104")
+```
+
+
+# Genetic Algorithm Subset Selection
+
+We use a Genetic Algorithm optimizing the R^2 of linear regression models with the following parameters to do predictor selection on the complete predictor set (Population size = 100, Cross-Over probability = 0.5, Mutation probability = 0.01). We arbitrarily decide to select subsets of size 5, 6, 7, 8, 9 and 10 predictors.
+
+
+```{r GA, echo=FALSE}
+set.seed(2)
+
+#RMSE_GEN <- function(error) {
+#  sqrt(mean(error^2))
+#}
+
+#trn <- train
+trn <- read.csv("Data/trainingdata.csv", header=T)
+test <- read.csv("Data/test_predictors.csv", header=T)
+
+#GENETIC ALGORITHM
+FE <- 10000 # max nb of fct evaluations
+popSize <- 100
+maxGen <- FE/popSize #nb of generations 
+
+pXO <- 0.5 #probability that a bit is inherited from parent 1
+pMut <- 0.01 #mutation probability
+
+N <- ncol(train_tr) - 1 
+X <- trn[, -1]
+#y <- trn[, 1]
+
+maxfeat <- c(5, 6, 7, 8, 9, 10)
+
+GA <- as.data.frame(matrix(0, nrow=6, ncol=5), row.names = F)
+
+for (feat in 1:length(maxfeat)){
+  
+  # Initialisation
+  
+  #parent population
+  x <- matrix(0, nrow=popSize, ncol=N) 
+  for (i in 1:popSize){
+    x[i, sample(N, maxfeat, replace=F)]=1
+  }
+  
+  x <- (x == 1)
+  fit <- matrix(0, nrow=popSize, ncol=1)
+  fitN <- fit
+  
+  for (i in 1:popSize){
+    mod <- lm(paste("y~",paste(colnames(X[x[i,]]), collapse = "+"), sep = ""), data=X)
+    fit[i] <- summary(mod)$r.squared
+    #fit[i] <- OF(X[, x[i,]], y) 
+  }
+  
+  iEl <- which.max(fit)
+  fitEl <- max(fit)
+  xEl <- x[iEl,]
+  
+  # Run
+  
+  for (gen in 2:maxGen){
+    
+    #XO
+    parent2 <- sample(popSize, popSize, replace=F) #find out who is parent2
+    xN <- x[parent2,] #offspring inherits features of parent2
+    XO <- matrix(runif(popSize*N), nrow=popSize, ncol=N) < pXO #which bits should be inherited from parent1
+    xN[XO] <- x[XO] #replace elements with features of parent1 (parent1=1:popSize)
+    
+    #mutation
+    mut <- matrix(runif(popSize*N), nrow=popSize, ncol=N) < pMut #choose bits to mutate
+    xN[mut] = !xN[mut] #perform mutation
+    
+    #evaluate
+    for (i in 1:popSize){
+      punish <- (-1)*(sum(xN[i,])>maxfeat[feat])
+      if (sum(xN[i,]) < maxfeat[feat]){
+        idx <- sample(N, maxfeat[feat], replace=F)
+        xN[i, idx] <- TRUE
+        xN[i, -idx] <- FALSE
+      }
+      mod <- lm(paste("y~",paste(colnames(X[xN[i,]]), collapse = "+"), sep = ""), data=X)
+      fitN[i] <- summary(mod)$r.squared + punish
+      #fitN[i] <- OF(X[,xN[i,]], y)
+    }
+    
+    #new population
+    improved <- fitN > fit #tournament between offspring i and parent i
+    x[improved,] <- xN[improved,]
+    fit[improved] <- fitN[improved]
+    
+    iEl <- which.max(fitN)
+    fitNEl <- max(fitN)
+    
+    if (fitNEl > fitEl){
+      xEl <- xN[iEl,]
+      fitEl <- fitNEl
+    }
+    
+  }
+  
+  # Report result
+  paste(c("Best subset: ", colnames(trn)[xEl]), collapse=" ")
+  paste(c("Best R2: ", fitEl), collapse=" ")
+  mod.fit <- summary(lm(y~as.matrix(X[,xEl])))
+  
+  GA[feat,2] <- maxfeat[feat]
+  GA[feat,3] <- paste(colnames(X)[xEl], collapse="+")
+  GA[feat,4] <- fitEl
+  GA[feat,5] <- RMSE_GEN(mod.fit$residuals)
+}
+
+GA[,1] <- 1:6
+colnames(GA) <- c("model", "maxfeat", "selected features", "R^2", "RMSE")
+
+```
+
+
+```{r GA results}
+pdf("Pict/GA_table.pdf", height=5, width=9)
+grid.table(GA, rows=NULL)
+dev.off()
+```
+
+
+We can implement cross-validation to assess the RMSE on 10 folds of the training set for each model selected by the Genetic Algorithm.
+
+```{r CV GA}
+set.seed(42)
+k <- 10
+
+cv <- function(trn, k){
+  trn_shuffled <- trn[sample(nrow(trn)),]
+  folds <- cut(seq(1,nrow(trn_shuffled)),breaks=k,labels=FALSE)
+  CV_MSE <- rep(0, 6)
+  SE <- rep(0, 6)
+  for (mod in 1:6){
+    MSE <- rep(0, k)
+    for (i in 1:k){
+      test_ind <- which(folds==i,arr.ind=TRUE)
+      testData <- trn_shuffled[test_ind, ]
+      trainData <- trn_shuffled[-test_ind, ]
+      fit <- lm(paste("y~", GA[mod,3], sep=""), data=trainData)
+      pred <- predict(fit, testData)
+      MSE[i] <- (k/nrow(trn))*sum((pred-testData$y)^2)
+    }
+    CV_MSE[mod] <- (1/k)*sum(MSE)
+    SE[mod] <- (1/sqrt(k))*sqrt(sum((MSE-CV_MSE[mod])^2)/(k-1))
+  }
+  list(MSE, CV_MSE, SE)
+}
+
+#MSE <- cv(trn, k)[[1]]
+CV_MSE <- cv(trn, k)[[2]]
+SE <- cv(trn, k)[[3]]
+
+pdf("Pict/GA_RMSE.pdf", height=5, width=10)
+plot(sqrt(CV_MSE), ylim=c(60, 180), col="red", ylab="RMSE", xlab="GA Model", main="RMSE of GA models", pch=15)
+points(GA$RMSE, col="blue", pch=17)
+legend("topright", c("CV_RMSE", "Train_RMSE"), col=c("red","blue"), lwd=1, lty=c(0,0), 
+       pch=c(15,17), cex=0.75)
+segments(1:6, sqrt(CV_MSE)-sqrt(SE), 1:6, sqrt(CV_MSE)+sqrt(SE), col="red")
+dev.off()
+
+sqrt(CV_MSE) - (sqrt(CV_MSE[6])+sqrt(SE[6])) #all models are within 1 SE => model 1 should be selected, most parsimonious
+sqrt(CV_MSE)
+```
+
+We see the CV RMSE is slightly higher than the training RMSE for each model. Model 6 (subset of 75 predictors) has the lowest CV RMSE, but using the 1 SE rule we would select model 1 with 5 predictors.
+
+Now, using model 1 with 5 variables to make predictions:
+```{r}
+mod_5 <- lm(paste("y~", GA[1,3], sep=""), data=trn)
+pred_GA_5 <- tibble(ID = 1:350, y = predict(mod_5, newdata = test))
+write.csv(pred_GA_5, "Predictions/pred_GA_5_caret.csv", row.names = FALSE)
+```
+
+The score is the following: 156.52481 (for model 5, not 1).
+
+#PCA
+```{r}
+#Separate numerical and categorical variables on TRN
+data <- as.data.frame(train_tr[,-1])
+num_ind <- unlist(lapply(data, is.numeric))  
+numerical <- as.matrix(data[, num_ind])
+categorical <- data[, !num_ind]
+
+# Do principal component analysis
+dat <- scale(numerical, center = T, scale = F)
+n <- NROW(dat)
+p <- NCOL(dat)
+pca <- svd(dat)
+A_trn <- pca$u %*% diag(pca$d)
+H_trn <- t(pca$v)
+
+# Look at the variance explained by the first q components, for some q < p
+q <- 60
+lambdas <- pca$d^2
+barplot(lambdas[1:q]/sum(lambdas), names.arg = 1:q)
+pdf("Pict/PCA_cumsum.pdf", height=5, width=10)
+barplot(cumsum(lambdas[1:q]/sum(lambdas)), names.arg = 1:q, ylim = c(0, 1), xlab="Principal Components", ylab="Proportion of variance explained")
+abline(h = 1, col = 'red')
+abline(h = 0.8, col = 'green') #Use first 40 PCs 
+dev.off()
+
+# Recombine approximated numerical dataset with categorical variables (TRN)
+pca_trn <- cbind(A_trn[,1:40] %*% H_trn[1:40,], categorical) #used first 40 PCs
+
+#Separate numerical and categorical variables on TEST
+data <- as.data.frame(test_tr[,-1])
+num_ind <- unlist(lapply(data, is.numeric))  
+numerical <- as.matrix(data[, num_ind])
+categorical <- data[, !num_ind]
+
+# Extract A matrix on TEST
+dat <- scale(numerical, center = T, scale = F)
+n <- NROW(dat)
+p <- NCOL(dat)
+pca <- svd(dat)
+A_test <- pca$u %*% diag(pca$d) #only recompute A on TEST
+
+# Recombine approximated numerical dataset with categorical variables (TEST)
+pca_test <- cbind(A_test[,1:40] %*% H_trn[1:40,], categorical) #use A (scores) from TEST with H (PCs) from TRN
+
+
+```
+
+
+# Variable selection overview
+Having done some variable selection using different methods (lasso, Genetic Algorithm, Regression Tree), we now compare the subsets of features and their respective RMSEs and public leaderboard scores.
+
+```{r variable selection overview}
+table <- as.data.frame(matrix(0, nrow=11, ncol=5))
+colnames(table) <- c("Model", "CV (Y/N)", "#p", "RMSE train", "Score")
+table[1,1] <- "Lasso"
+table[1,2] <- "Y"
+table[1,3] <- 8
+table[1,4] <- 72.17375
+table[1,5] <- 88.75
+
+table[2,1] <- "GA_5"
+table[2,2] <- "Y"
+table[2,3] <- 5
+table[2,4] <- 88.00416
+table[2,5] <- NA
+
+table[3,1] <- "GA_6"
+table[3,2] <- "Y"
+table[3,3] <- 6
+table[3,4] <- 86.13443
+table[3,5] <- NA
+
+table[4,1] <- "GA_7"
+table[4,2] <- "Y"
+table[4,3] <- 7
+table[4,4] <- 85.57663
+table[4,5] <- NA
+
+table[5,1] <- "GA_8"
+table[5,2] <- "Y"
+table[5,3] <- 8
+table[5,4] <- 85.13476
+table[5,5] <- NA
+
+table[6,1] <- "GA_9"
+table[6,2] <- "Y"
+table[6,3] <- 9
+table[6,4] <- 83.81718
+table[6,5] <- NA
+
+table[7,1] <- "GA_10"
+table[7,2] <- "Y"
+table[7,3] <- 10
+table[7,4] <- 83.34630
+table[7,5] <- NA
+
+table[8,1] <- "kNN"
+table[8,2] <- "Y"
+table[8,3] <- 111
+table[8,4] <- 155.0958
+table[8,5] <- 122.32133
+
+table[9,1] <- "Tree"
+table[9,2] <- "Y"
+table[9,3] <- 6
+table[9,4] <- 73.97789
+table[9,5] <- 92.24640
+
+table[10,1] <- "Bagging"
+table[10,2] <- "N"
+table[10,3] <- 6
+table[10,4] <- 197.3419
+table[10,5] <- 215.89523
+
+table[11,1] <- "Random Forest"
+table[11,2] <- "N"
+table[11,3] <- 37
+table[11,4] <- 91.38916
+table[11,5] <- 75.21284
+table
+```
+
+```{r table overview}
+pdf("Pict/subset_table.pdf", height=5, width=9)
+grid.table(table, rows=NULL)
+dev.off()
+```
+
+```{r table of variables}
+RF <- c("X34", "X35", "X59", "X60", "X62", "X68", "X75", "X104")
+
+#feature_occurence <- c(subset_lasso[-1], unlist(strsplit(GA[1,3], "\\+")), unlist(strsplit(GA[2,3], "\\+")), unlist(strsplit(GA[3,3], "\\+")), unlist(strsplit(GA[4,3], "\\+")), unlist(strsplit(GA[5,3], "\\+")), unlist(strsplit(GA[6,3], "\\+")), RF)
+
+feature_occurence <- c(subset_lasso[-1], unlist(strsplit(GA[6,3], "\\+")), RF, subset_tree)
+
+freq_vars <- names(sort(table(feature_occurence), decreasing=T)[1:10])
+pdf("Pict/feature_occurence.pdf", height=5, width=9)
+barplot(sort(table(feature_occurence), decreasing=T)[1:10], names.arg=names(sort(table(feature_occurence), decreasing=T)[1:10][1:10]), main="Feature Occurence in Subsets", las=2)
+dev.off()
+```
+
+
+We see that certain variables appear more than others in the subsets of predictors.
+
+```{r descriptive statistics of most frequent variables}
+var <- paste("Var    :", round(sapply(trn[freq_vars], var), 4))
+summary <- rbind(summary(trn[freq_vars]),var)
+pdf("Pict/descriptive_stats.pdf", height=5, width=20)
+grid.table(summary, rows=NULL)
+dev.off()
+```
+
+Make a final clean table
+```{r}
+# Extractrelevant variables from RF
+RF <- c("X34", "X35", "X59", "X60", "X62", "X68", "X75", "X104")
+
+# Create a vector of relevant features for each model family
+features_lasso <- subset_lasso[-1]
+features_ga <- unlist(strsplit(GA[6,3], "\\+"))
+features_rf <- RF
+features_tree <- subset_tree
+features_boosting <- man_features_boosting
+
+# Create extensive summary table
+feature_occurence <- c(features_lasso, features_ga, features_rf, features_tree)
+freq_vars <- names(sort(table(feature_occurence), decreasing=T)[1:10])
+feat_tbl <- tibble(feature = feature_occurence %>% unique)
+feat_tbl %<>% mutate(id = feature %>% str_replace("X", "") %>% as.integer)
+feat_tbl %<>% arrange(id)
+feat_tbl %<>% mutate(lasso = feature %in% features_lasso)
+feat_tbl %<>% mutate(genetic_alg = feature %in% features_ga)
+feat_tbl %<>% mutate(tree = feature %in% features_tree)
+feat_tbl %<>% mutate(random_forest = feature %in% features_rf)
+feat_tbl %<>% mutate(boosting = feature %in% features_boosting)
+feat_tbl %<>% mutate(total = lasso + genetic_alg + tree + random_forest + boosting)
+
+# Sort the table
+feat_tbl %<>% select(feature, id, lasso, genetic_alg, tree, random_forest, boosting, total)
+
+#feat_tbl  # display the table
+
+# Backup table
+save(feat_tbl, file = "Data/feat_tbl.RData")
+```
+
+Redo barplot feature occurence
+```{r}
+pl <- ggplot(feat_tbl, aes(x = reorder(feature, -total), y = total)) 
+pl <- pl + geom_col()
+pl <- pl + labs(x = "Feature", y = "Number of selections")
+ggsave(filename = "Pict/feature_occurence2.pdf", width = 7, height = 3.5)
+pl
+```
+
+And now the descriptive statistics:
+```{r}
+# create object
+#train <- read_csv("Data/trainingdata.csv")
+freq_vars <- feat_tbl$feature
+train %>% select(freq_vars) %>% as.data.frame() %>% stargazer(title = "Summary statistics of selected variables")
+# transpose -> clean
+#sumstats <- summary %>% t()
+```
+
+
+
+# Models revisited with variable selection
+
+## GAM
+
+### Basic model
+
+In this section, we attempt a simple additive model using mgcv. Since we have only 350 observations, variable selection has to be performed. Let's recall which variables were selected by our process:
+
+```{r}
+vartype <- train_tr %>% lapply(class) %>% unlist() %>% as_tibble(rownames = "varname")
+names(vartype) <- c("feature", "type")
+feat_tbl <- inner_join(feat_tbl, vartype, by = "feature")
+feat_tbl %>% kable()
+pl <- ggplot(feat_tbl, aes(x = total, fill = factor(total))) + geom_bar()
+pl <- pl + scale_fill_brewer(palette = "Set1")
+pl <- pl + labs(x = "Number of selections", y = "Number of variables")
+pl
+```
+
+Let's focus on the variables which were kept at least 5 times. These are the followings:
+```{r}
+feat_tbl %>% filter(total > 4) %>% kable()
+```
+
+some tests to see how to fit a gam:
+```{r}
+gam_test <- gam(y ~ X35 + s(X59),
+                data = train_tr)
+gam_test %>% summary()
+```
+
+
+Now, let's try a basic non-parametric model
+```{r}
+eq <- "y ~ X35 + s(X59) + s(X60) + s(X62) + X68 + X75 + s(X104)"
+form <- eq %>% as.formula
+gam_basic <- gam(form,
+                 data = train_tr)
+gam_basic %>% gam.check()
+gam_basic %>% summary()
+```
+
+Let's evaluate the prediction quality:
+```{r}
+gam_basic_predtrain <- predict(gam_basic)
+gam_basic_trainerror <- RMSE(train_tr$y, gam_basic_predtrain)
+gam_basic_trainerror
+```
+
+We obtain an error of 64.18046. This is very promissing! Now, we have to think about two more things:
+
+- cross-validation
+- including the other variables
+
+### Cross-validation
+
+Cross-validation seems ok since the only tuning parameter here is the wiggliness penalty and it is already cross-validated at the fitting. However, we can make a check by computing a cv error
+
+To do this, let's fit the model with caret with no cv and then with CV
+```{r}
+#caret::train(y ~ X35 + s(X59) + s(X60) + s(X62) + X68 + X75 + s(X104),
+#             data = train_tr,
+#             method = "gam",
+#             #tuneGrid = expand.grid(cp = 0),
+#             metric = "RMSE",  #
+#             trControl = trainControl(
+#               method = "cv", 
+#               number = 10  # Nr of folds
+#  ))
+```
+
+Some references on this:
+- https://stackoverflow.com/questions/41663516/caret-package-cross-validating-gam-with-both-smooth-and-linear-predictors
+- https://topepo.github.io/caret/measuring-performance.html#reg 
+
+
+This does not work. We have to implement CV by hand:
+```{r}
+set.seed(1)
+CV_gam(form = form, dat = train_tr, K = 10)
+```
+
+So with a CV error of 69.7398, we have something that remains comparable
+
+To be sure, try to fit the model on only the first half of the data to assess the error:
+```{r}
+train_tr_half1 <- train_tr[1:175,]
+train_tr_half2 <- train_tr[176-350,]
+gam_basic2 <- gam(form, data = train_tr_half1)
+gam_basic_predtrain2 <- predict(gam_basic, newdata = train_tr_half2)
+gam_basic_trainerror2 <- RMSE(train_tr_half2$y, gam_basic_predtrain2)
+gam_basic_trainerror2
+```
+
+Altough not identical, this seems acceptable.
+
+### Add other variables
+
+Now, let's see if it supports using all the variables selected once by our methods:
+```{r}
+feat_tbl %>% select(feature, type, everything()) %>%  arrange(id) %>% kable()
+```
+
+Basis equation
+```{r}
+eq <- "y ~ X19 + X32 + X34 + X35 + X55 + s(X59) + s(X60) + s(X62) + X68 + X75 + s(X104) + X105 + s(X109)"
+form <- eq %>% as.formula()
+gam_select <- gam(form, data = train_tr)
+gam_select %>% summary()
+```
+
+We see that many things become insignificant and that the explained deviance increases only slighly. This is probably because of redundence in the factors. Let's recompute the RMSE anyway:
+```{r}
+gam_select_predtrain <- predict(gam_select)
+gam_select_trainerror <- RMSE(train_tr$y, gam_select_predtrain)
+gam_select_trainerror
+```
+
+We have a slightly lower RMSE (58.73134). What if we cross-validate?
+```{r}
+set.seed(1)
+CV_gam(form = form, dat = train_tr, K = 10)
+```
+
+Our CV error is 76.0017. So we really have overfitting. Let's try some variable selection
+
+### Variable selection
+
+We start by removing X19
+
+```{r}
+# Remove X19
+eq <- "y ~ X32 + X34 + X35 + X55 + s(X59) + s(X60) + s(X62) + X68 + 
+X75 + s(X104) + X105 + s(X109)"
+form <- eq %>% as.formula
+gam_select2 <- gam(form,
+                   data = train_tr)
+gam_select2 %>% summary
+```
+
+Remove X55
+```{r}
+eq <- "y ~ X32 + X34 + X35 + s(X59) + s(X60) + s(X62) + X68 + 
+X75 + s(X104) + X105 + s(X109)"
+form <- eq %>% as.formula
+gam_select3 <- gam(form,
+                   data = train_tr)
+gam_select3 %>% summary
+```
+
+Remove X109
+```{r}
+eq <- "y ~ X32 + X34 + X35 + s(X59) + s(X60) + s(X62) + X68 + 
+X75 + s(X104) + X105"
+form <- eq %>% as.formula
+gam_select4 <- gam(form,
+                   data = train_tr)
+gam_select4 %>% summary
+```
+
+Remove X62
+```{r}
+eq <- "y ~ X32 + X34 + X35 + s(X59) + s(X60) + X68 + 
+X75 + s(X104) + X105"
+form <- eq %>% as.formula
+gam_select5 <- gam(form,
+                   data = train_tr)
+gam_select5 %>% summary
+```
+
+Now, compute the RMSE
+```{r}
+gam_select5_predtrain <- predict(gam_select5, newdata = train_tr)
+gam_select5_trainerror <- RMSE(train_tr$y, gam_select5_predtrain)
+gam_select5_trainerror
+```
+
+So we have a prediction error of 60.46202 What about its CV equivalent?
+```{r}
+set.seed(1)
+CV_gam(form = form, dat = train_tr, resp_name = "y", K = 10)
+```
+
+It is quite larger (71.8991). Maybe we can be more sparse and remove X34:
+```{r}
+eq <- "y ~ X32 + X35 + s(X59) + s(X60) + X68 + 
+X75 + s(X104) + X105"
+form <- eq %>% as.formula
+gam_select6 <- gam(form,
+                   data = train_tr)
+gam_select6 %>% summary
+```
+
+And now, the RMSE
+```{r}
+gam_select6_predtrain <- predict(gam_select6, newdata = train_tr)
+gam_select6_trainerror <- RMSE(train_tr$y, gam_select6_predtrain)
+gam_select6_trainerror
+```
+
+Slightly larger than above (61.86552), but ok. What about the CV-error?
+```{r}
+set.seed(1)
+CV_gam(form = form, dat = train_tr, resp_name = "y", K = 10)
+```
+
+It remains comparable. So maybe the best choice was the first model (maybe with some slight modifications)
+
+### Basic model revisited
+
+Retry the basic model, but without variable X62
+```{r}
+eq <- "y ~ X35 + s(X59) + s(X60) + X68 + X75 + s(X104)"
+form <- eq %>% as.formula
+gam_basic_noX62 <- gam(form, data = train_tr)
+gam_basic_noX62 %>% gam.check()
+gam_basic_noX62 %>% summary()
+```
+
+Everything is strongly significant. What about the metrics? Start with RMSE
+```{r}
+gam_basic_noX62_predtrain <- predict(gam_basic_noX62)
+gam_basic_noX62_trainerror <- RMSE(train_tr$y, gam_basic_noX62_predtrain)
+gam_basic_noX62_trainerror
+```
+
+64.20218.
+
+We go higher, but it remains fairly ok. What about the CV error?
+```{r}
+set.seed(1)
+CV_gam(form = form, dat = train_tr, K = 10)
+```
+
+This is comparable. So let's keep this model and use it for predictions on the test set
+
+
+### Predictions
+
+Let's recall the previous stats:
+
+- RMSE: 64.20218
+- CV-error: 69.70358
+
+Now, make the predictions
+```{r}
+pred_gam_basic_noX62 <- tibble(ID = 1:350, y = predict(gam_basic_noX62, newdata = test_tr))
+write.csv(pred_gam_basic_noX62, "Predictions/pred_gam_basic_noX62.csv", row.names = FALSE)
+```
+
+
+We obtain a score or 70.17283
+
+Summary table:
+```{r}
+sumTable_gam <- data.frame(model = "Semiparametric model",  p = 6, cv_error = 69.70, leaderboard = 70.17)
+```
+
+
+### GAM: Some forward selection
+
+We can try to do better by using some forward selection. The idea is to write an algorithm that works as follows:
+
+> StepGam <- function(formula, data)
+>   Create a table with (1) model (2) new variable (3) RMSE (4) CV-error
+>   fit the model
+>   compute RMSE
+>   compute CV-error
+>   Create list of predictors to use
+>   for each potential new predictor
+>     add it to the model and fit
+>     compute new RMSE
+>     compute new CV-error
+>     Put errors in table
+>   determine best variable to add considering cv-error
+>   print best variable to add considering cv-error
+>   Return table
+
+The algorith can be found in the following file
+```{r}
+source("Scripts/StepGam.R")
+```
+
+Try to run it (will probably require patience)
+```{r}
+set.seed(2)
+tbl_StepGam1 <- StepGam(base_model = gam_basic_noX62, data = train_tr, outcome = "y")
+```
+
+Plot the results
+```{r}
+
+pl <- ggplot(tbl_StepGam1 %>% na.omit(), 
+             aes(x = rank(-cv_error)))
+pl <- pl + geom_hline(yintercept = tbl_StepGam1$cv_error[1], col = "red")
+pl <- pl + geom_line(aes(y = cv_error))
+pl <- pl + labs(x = "Predictor ranks by decreasing CV-error",
+                y = "CV-error",
+                yintercept = "CV-error of the basis model")
+ggsave("Pict/stepgam_cv.pdf", pl)
+pl
+```
+
+So it seems that adding some predictors might help to decrease the CV-error. Let's add X81
+
+#### Adding X81
+
+Let's see what happens if we add X81
+```{r}
+eq <- "y ~ X35 + s(X59) + s(X60) + X68 + X75 + s(X81) + s(X104)"
+form <- eq %>% as.formula()
+gam_forward1 <- gam(form, data = train_tr)
+gam_forward1 %>% gam.check()
+gam_forward1 %>% summary()
+```
+
+It does not seem to add much.
+
+#### Adding X48
+
+What about another interesting variable? X48 is the second-best ranked
+```{r}
+eq <- "y ~ X35 + s(X48) + s(X59) + s(X60) + X68 + X75 + s(X104)"
+form <- eq %>% as.formula()
+gam_forward2 <- gam(form, data = train_tr)
+gam_forward2 %>% gam.check()
+gam_forward2 %>% summary()
+```
+
+We also have something non-significant. This starts to look bad :(
+
+#### Adding X41
+
+Finally, let's try to add X41
+```{r}
+eq <- "y ~ X35 + s(X41) + s(X59) + s(X60) + X68 + X75 + s(X104)"
+form <- eq %>% as.formula()
+gam_forward3 <- gam(form, data = train_tr)
+gam_forward3 %>% gam.check()
+gam_forward3 %>% summary()
+```
+
+Here again, we have nothing significant. This means that our model is probably the same for this gam setting.
+
+
+## kNN revisited
+
+Run it
+```{r message=TRUE}
+set.seed(1)
+kmax <- train_tr %>% ncol() - 1
+knn_caret_varsel <- caret::train(
+  x = train_tr %>% select(feat_tbl$feature), # the predictors
+  y = train_tr$y, # the response
+  method = "knn", # the family of models to use
+  metric = "RMSE", # the loss function / metric
+  tuneGrid = expand.grid(k = 1:kmax), # range of tuning parameter
+  trControl = trainControl(
+    method = "cv",
+    number = 10, # Nr of folds
+    selectionFunction = "oneSE" # use the one SE rule
+  )
+)
+```
+
+Compute the new RMSE (no CV)
+```{r}
+knn_caret_varsel_rmse <- RMSE(predict(knn_caret_varsel), train_tr$y)
+knn_caret_varsel_rmse
+```
+
+This is not extraordinary. What about using the same predictors as for the gam?
+```{r}
+set.seed(1)
+kmax <- train_tr %>% ncol() - 1
+knn_caret_vargam <- caret::train(
+  x = train_tr %>% select(X35, X59, X60, X68, X75, X104), # the predictors
+  y = train_tr$y, # the response
+  method = "knn", # the family of models to use
+  metric = "RMSE", # the loss function / metric
+  tuneGrid = expand.grid(k = 1:kmax), # range of tuning parameter
+  trControl = trainControl(
+    method = "cv",
+    number = 10, # Nr of folds
+    selectionFunction = "oneSE" # use the one SE rule
+  )
+)
+knn_caret_vargam
+```
+We finally keep k = 11.
+
+
+The CV-error is the following
+```{r}
+knn_caret_vargam$results %>% filter(k == 11) %>% .$RMSE
+```
+
+79.32036
+
+This is much better! Maybe a bagging with these variables would do better.
+
+Plot the CV:
+```{r}
+K <- 10
+pl <- ggplot(knn_caret_vargam$results %>% filter(k < 65), aes(x = k, y = RMSE))
+pl <- pl + geom_point(alpha = 0.3) + geom_line()
+pl <- pl + geom_errorbar(aes(
+  ymin = RMSE - (RMSESD / sqrt(K)),
+  ymax = RMSE + (RMSESD / sqrt(K))
+))
+id_minCV <- knn_caret_vargam$results$RMSE %>% which.min()
+minCV <- knn_caret_vargam$results$RMSE[id_minCV]
+minCV_SE <- knn_caret_vargam$results$RMSESD[id_minCV] / sqrt(K)
+pl <- pl + geom_hline(aes(yintercept = minCV + minCV_SE, col = "blue"))
+pl <- pl + geom_hline(aes(yintercept = minCV, col = "red"))
+
+pl <- pl + labs(x = "Number of neighbours", y = "CV-error", col = NULL)
+pl <- pl + scale_color_discrete(labels = c("One standard error rule limit", "Minimal CV-error"))
+knn_caret_vargam_cvplot <- pl
+knn_caret_vargam_cvplot
+ggsave("Pict/knn_caret_vargam_CV.pdf", pl, width = 7, height = 3.5)
+```
+
+
+Make some predictions
+```{r}
+pred_knn_caret_vargam <- tibble(ID = 1:350, y = predict(knn_caret_vargam, newdata = test_tr))
+write.csv(pred_knn_caret_vargam, "Predictions/pred_knn_caret_vargam.csv", row.names = FALSE)
+```
+
+## Boosting revisited
+```{r}
+#all code run in first boosting chunk
+```
+# Feature interpretation
+
+The feature occurence without considering the genetic algorithm (Samuel's interest)
+```{r}
+feature_occurence_nogen <- c(subset_lasso[-1], subset_tree)
+tab_feat <- sort(table(feature_occurence_nogen), decreasing = TRUE)
+barplot(tab_feat, names.arg = names(tab_feat), main = "Feature Occurence in Subsets (Lasso and Tree)", las=2)
+```
+
+Let's focus on those appearing twice and try to interpret them. Sort them by name:
+```{r}
+feat_sel <- tab_feat %>% as_tibble
+names(feat_sel) <- c("feature", "occurence")
+feat_sel <- feat_sel %>% filter(occurence > 1)
+feat_sel <- feat_sel %>% arrange(feature)
+feat_sel <- feat_sel %>% slice(c(2:nrow(feat_sel), 1))
+feat_sel
+```
+
+## X35
+
+Now, some interpretation attempt. Var X35:
+```{r}
+# Class
+train_tr$X35 %>% class()
+# This is an factor
+
+# Levels:
+train$X35 %>% as.factor() %>% levels()
+
+# bar plot
+lev_freq_X35 <- table(train$X35) %>% as.matrix() %>% as_tibble(rownames = "level")
+names(lev_freq_X35) <- c("level", "frequency")
+lev_freq <- lev_freq_X35
+pl <- ggplot(lev_freq, aes(x = level, y = frequency, fill = level))
+pl <- pl + geom_bar(stat = "identity")
+pdf("Pict/X35.pdf", height=5, width=20)
+pl
+dev.off()
+ggsave("Pict/X35_gg.pdf", pl, width = 7, height = 4)
+```
+
+This is probably a binary variable. Example: is the number of the day even (ex 2nd of May) or odd (ex: 1st of May) ?
+
+## X59
+
+Now, feature X59:
+```{r}
+# Class
+train_tr$X59 %>% class()
+# This is a continuous variable
+
+# histogram
+pl1 <- ggplot(train, aes(x = X59))
+pl1 <- pl1 + geom_histogram()
+
+ggsave("Pict/X59_gg.pdf", pl1, width = 7, height = 4)
+
+# Class
+train_tr$X60 %>% class()
+# This is a continuous variable
+
+# histogram
+pl2 <- ggplot(train, aes(x = X60))
+pl2 <- pl2 + geom_histogram()
+pdf("Pict/X60.pdf", height=5, width=20)
+
+dev.off()
+pdf("Pict/X59_X60.pdf", height=5, width=20)
+grid.arrange(pl1, pl2, ncol=2)
+dev.off()
+ggsave("Pict/X60_gg.pdf", pl2, width = 7, height = 4)
+```
+
+This could be a variable such as the "amount of money spend it the city during the day".
+
+## X60
+
+This could be again any continuous variable, 
+
+## X75
+
+Now, feature X75:
+```{r}
+# Class
+train_tr$X75 %>% class()
+# This is a factor
+
+# Levels:
+train$X75 %>% as.factor() %>% levels()
+
+# bar plot
+lev_freq_X75 <- table(train$X75) %>% as.matrix() %>% as_tibble(rownames = "level")
+names(lev_freq_X75) <- c("level", "frequency")
+lev_freq <- lev_freq_X75
+pl3 <- ggplot(lev_freq, aes(x = level, y = frequency, fill = level))
+pl3 <- pl3 + geom_bar(stat = "identity")
+pl3 <- pl3 + scale_x_discrete(labels = NULL)
+ggsave("Pict/X75_gg.pdf", pl3, width = 7, height = 4)
+
+# Class
+train_tr$X104 %>% class()
+# This is a continuous variable
+
+# histogram
+pl4 <- ggplot(train, aes(x = X104))
+pl4 <- pl4 + geom_histogram()
+
+pdf("Pict/X75_X104.pdf", height=5, width=20)
+grid.arrange(pl3, pl4, ncol=1)
+dev.off()
+ggsave("Pict/X104_gg.pdf", pl4, width = 7, height = 4)
+
+```
+
+There are 4 levels. This is probably a variable related to the quarter.
+
+## X104
+
+Now, variable X104
+```{r}
+# Class
+train_tr$X104 %>% class()
+# This is a continuous variable
+
+# histogram
+pl <- ggplot(train, aes(x = X104))
+pl <- pl + geom_histogram()
+pdf("Pict/X104.pdf", height=5, width=20)
+pl
+dev.off()
+```
+
+Again, this could be any comtinuous variable, such as the average daily temperature.
+
+
+
+
+
+# Results
+
+## Summary table
+
+The summary table
+
+```{r}
+sumTable_final <- rbind(
+  sumTable_bag1,
+  sumTable_bag2,
+  sumTable_intercept,
+  sumTable_knn_caret,
+  sumTable_lm_all,
+  sumTable_ridge,
+  sumTable_singletree,
+  sumTable_lasso_caret,
+  sumTable_rf3,
+  sumTable_rf2,
+  sumTable_rf1,
+  sumTable_gam,
+  sumTable_boost2,
+  sumTable_boost1
+  
+)
+save(sumTable_final, file = "Data/sumTable_final.RData")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
