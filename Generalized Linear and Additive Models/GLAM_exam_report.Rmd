@@ -1,0 +1,416 @@
+---
+title: "GLAM exam report Kieran Schubert"
+output: 
+  pdf_document:
+    number_sections: true
+fontsize: 10pt
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd("/Users/kieranschubert/Desktop/Statistics/2nd_Semester/GLAM/Exam")
+#install.packages("statmod", repos='http://cran.us.r-project.org')
+library(statmod)
+#install.packages("brglm", repos='http://cran.us.r-project.org')
+library(brglm)
+#install.packages("robustbase", repos='http://cran.us.r-project.org')
+library(robustbase)
+#install.packages("knitr", repos='http://cran.us.r-project.org')
+library(knitr)
+#install.packages("gridExtra", repos='http://cran.us.r-project.org')
+library(gridExtra)
+#install.packages("R.utils", repos='http://cran.us.r-project.org')
+library(R.utils)
+library(mgcv)
+```
+
+# Exploratory Data Analysis
+
+## Dataset Structure
+
+### Dataset size
+```{r, echo=F, fig.cap=T}
+orange <- read.table("orange_juice.dat", header=T)
+y <- orange$CRA8132
+
+data.frame(
+  nrows = nrow(orange),
+  ncols = ncol(orange)
+)
+```
+
+### Variable Type
+```{r, echo=F}
+str(orange) 
+```
+
+### Variable range
+```{r, echo=F}
+data.frame(
+  CRA8132.range = range(orange$CRA8132),
+  pH.range = range(orange$pH),
+  LL.range = range(orange$LL),
+  Temp.range = range(orange$Temp),
+  Brix.range = range(orange$Brix),
+  row.names=c("min", "max")
+)
+```
+### Correlation & Variable Frequency
+```{r, echo=F}
+cor(orange)
+```
+
+```{r, echo=F}
+kable(list(table(orange$CRA8132, dnn="CRA8132"), table(orange$pH, dnn="pH"), table(orange$LL, dnn="LL"), table(orange$Temp, dnn="Temp"), table(orange$Brix, dnn="Brix")))
+```
+
+```{r, echo=F, eval=F}
+par(mfrow=c(2,3))
+hist(orange$CRA8132, xlab="Response", main=NULL)
+hist(orange$pH, xlab="pH", main=NULL)
+hist(orange$LL, xlab="LL", main=NULL)
+hist(orange$Temp, xlab="Temp", main=NULL)
+hist(orange$Brix, xlab="Brix", main=NULL)
+```
+
+
+```{r, echo=F, eval=F}
+# Response vs covariates
+par(mfrow=c(2,2))
+plot(y, orange$pH, xlab="Response", ylab="pH")
+plot(y, orange$LL, xlab="Response", ylab="LL")
+plot(y, orange$Temp, xlab="Response", ylab="Temp")
+plot(y, orange$Brix, xlab="Response", ylab="Brix")
+```
+
+```{r, echo=F,eval=F}
+# covariates vs covariates
+par(mfrow=c(2,3))
+plot(orange$pH, orange$LL, xlab="pH", ylab="LL")
+plot(orange$pH, orange$Temp, xlab="pH", ylab="Temp")
+plot(orange$pH, orange$Brix, xlab="pH", ylab="Brix")
+plot(orange$LL, orange$Temp, xlab="LL", ylab="Temp")
+plot(orange$LL, orange$Brix, xlab="LL", ylab="Brix")
+plot(orange$Temp, orange$Brix, xlab="Temp", ylab="Brix")
+```
+\newpage
+# Modelling
+
+## Model 1: Full model
+```{r, echo=F}
+mod1 <- glm(CRA8132~., data=orange, family=binomial)
+sum1 <- summary(mod1) # remove params in Deviance for df
+sum1
+```
+
+```{r, echo=F, include=F}
+# GOODNESS OF FIT TEST
+mod1.p <- pchisq(sum1$deviance, df=sum1$df.residual, lower.tail=FALSE) #DO NOT REJECT H0 => B_hat != 0 => model significant
+```
+
+## Model 2: Removing obs 7 and 44
+```{r, echo=F}
+orange.omit <- orange[-c(7, 44),]
+mod2  <- glm(CRA8132~.,family=binomial,data=orange.omit)
+sum2 <- summary(mod2)
+sum2
+# all coefs significant except Brix
+# AIC is much lower than full model (39.82)
+```
+
+```{r, echo=F, include=F}
+mod2.p <- pchisq(sum2$deviance, df=sum2$df.residual, lower.tail=FALSE) 
+```
+
+## Model 3 : Removing Brix
+```{r, echo=F}
+mod3 <-glm(CRA8132~pH+LL+Temp,family=binomial,data=orange.omit)
+sum3 <- summary(mod3)
+sum3
+```
+
+```{r, echo=F, include=F}
+mod3.p <- pchisq(sum3$deviance, df=sum3$df.residual, lower.tail=FALSE) 
+```
+
+## Model 4: GAM
+```{r, fig.height=2.5, fig.width=7, echo=F}
+par(mfrow = c(2, 2), mar=c(1, 2, 1, 1) + 0.1, xpd=NA)
+mod2.gam <- gam(CRA8132~s(pH, k=4)+s(LL, k=4)+s(Temp, k=4)+s(Brix, k=4), family=binomial, data=orange)
+plot(mod2.gam,cex=3,residuals=T,pages=1)
+
+mod4 <- glm(CRA8132~pH+LL+Temp+I(Brix^2), family=binomial, data=orange)
+sum4 <- summary(mod4)
+#sum7
+```
+
+```{r, echo=F, include=F}
+mod4.p <- pchisq(sum4$deviance, df=sum4$df.residual, lower.tail=FALSE) 
+```
+## Model 5: Exhaustive Search (with all observations, 1st order interactions, Brix^2)
+
+```{r, echo=F, warning=FALSE}
+# Exhaustive search, all logistic regression models with interactions, LOGIT link
+pH_LL <- orange$pH*orange$LL
+pH_Temp <- orange$pH*orange$Temp
+pH_Brix <- orange$pH*orange$Brix
+LL_Temp <- orange$LL*orange$Temp
+LL_Brix <- orange$LL*orange$Brix
+Temp_Brix <- orange$Temp*orange$Brix
+Brix2 <- orange$Brix^2
+
+orange.aug <- cbind(orange, pH_LL, pH_Temp, pH_Brix, LL_Temp, LL_Brix, Temp_Brix, Brix2)
+regressors <- colnames(orange.aug)[-5]
+regMat <- expand.grid(c(TRUE,FALSE), c(TRUE,FALSE),
+                      c(TRUE,FALSE), c(TRUE,FALSE), 
+                      c(TRUE,FALSE), c(TRUE,FALSE),
+                      c(TRUE,FALSE), c(TRUE,FALSE),
+                      c(TRUE,FALSE), c(TRUE,FALSE),
+                      c(TRUE,FALSE))
+
+regMat <- regMat[-(dim(regMat)[1]),] #The last row is the null model so we remove it
+names(regMat) <- regressors
+
+allModelsList <- apply(regMat, 1, function(x) as.formula(paste(c("CRA8132~1", regressors[x]), collapse="+")))
+
+allModelsResults <- lapply(allModelsList, function(x) glm(x, data=orange, family=binomial))
+
+library(plyr)
+aic <- ldply(allModelsResults, function(x) as.data.frame(
+                     t(AIC(x))))
+#plot(aic$V1, type="o")
+#sort(aic$V1, index.return=T)
+
+allModelsResults[1201]
+mod5 <- glm(CRA8132~pH+LL+Temp+Brix+pH_Brix+LL_Brix+Temp_Brix, data=orange.aug, family=binomial)
+sum5 <- summary(mod5)
+sum5
+```
+
+```{r, echo=F, include=F}
+step(mod5)
+
+#full model has lowest AIC (62.33) => include all predictors 
+```
+
+```{r, echo=F, include=F}
+mod5.p <- pchisq(sum5$deviance, df=sum5$df.residual, lower.tail=FALSE) 
+```
+
+## Model 6: bias reduction glm without obs 41
+```{r, echo=F, fig.height=2.5, fig.width=7, warning=F}
+data <- orange.aug[-c(41),]
+mod <- glm(CRA8132~pH+LL+Temp+Brix+pH_Brix+LL_Brix+Temp_Brix, data=data, family=binomial)
+sum <- summary(mod)
+#sum
+
+mod6 <- brglm(CRA8132~pH+LL+Temp+Brix+pH_Brix+LL_Brix+Temp_Brix, data=data, family=binomial)
+sum6 <- summary(mod6)
+sum6
+
+```
+
+```{r, echo=F, include=F}
+mod6.p <- pchisq(sum6$deviance, df=sum6$df.residual, lower.tail=FALSE) 
+```
+
+## Model comparison
+
+### Model Formulas
+```{r, echo=F}
+paste("Model 1: ", formula(mod1))[3]
+paste("Model 2: ", formula(mod2))[3]
+paste("Model 3: ", formula(mod3))[3]
+paste("Model 4: ", formula(mod4))[3]
+paste("Model 5: ", formula(mod5))[3]
+paste("Model 6: ", formula(mod6))[3]
+
+```
+
+### Coefficients
+```{r, echo=F}
+
+# Model 1: full model, all observations
+# Model 2: model without obs. 7 and 44
+# Model 3: model without Brix, without obs. 7 and 44
+# Model 4: exhaustive search model, with interactions, all obs
+# Model 5: exhaustie search model, with interactions, without obs. 7 and 44
+# Model 6: bias reduction glm
+# model 7: Quadratic fit for Brix
+
+#Coefficients
+data.frame(
+  predictors.mod1 = names(coef(mod1)),
+  beta.mod1 = c(coef(mod1)), 
+  predictors.mod2 = names(coef(mod2)),
+  beta.mod2 = c(coef(mod2)),
+  predictors.mod3 = c(names(coef(mod3)), NA),
+  beta.mod3 = c(coef(mod3), NA),
+  predictors.mod4 = names(c(coef(mod4))),
+  beta.mod4 = c(coef(mod4)),
+  row.names=NULL
+  )
+data.frame(
+  predictors.mod5 = names(coef(mod5)),
+  beta.mod5 = c(coef(mod5)),
+  predictors.mod6 = names(coef(mod6)),
+  beta.mod6 = c(coef(mod6))
+)
+
+```
+
+### Standard Errors
+```{r, echo=F}
+#Std errors
+data.frame(
+  predictors.mod1 = names(coef(mod1)),
+  stderr.mod1 = c(summary(mod1)$coef[,2]), 
+  predictors.mod2 = names(coef(mod2)),
+  stderr.mod2 = c(summary(mod2)$coef[,2]),
+  predictors.mod3 = c(names(coef(mod3)), NA),
+  stderr.mod3  = c(summary(mod3)$coef[,2], NA),
+  predictors.mod4 = names(coef(mod4)),
+  stderr.mod4 = c(summary(mod4)$coef[,2]),
+  row.names=NULL
+)
+
+data.frame(
+    predictors.mod5 = names(coef(mod5)),
+    stderr.mod5 = c(summary(mod5)$coef[,2]),
+    predictors.mod6 = names(coef(mod6)),
+    stderr.mod6 = c(summary(mod6)$coef[,2])
+)
+```
+
+### AIC
+```{r, echo=F}
+#AIC => use because based on log-lik not deviance
+
+data.frame(
+  mod1.aic = summary(mod1)$aic,
+  mod2.aic = summary(mod2)$aic,
+  mod3.aic = summary(mod3)$aic,
+  mod4.aic = summary(mod4)$aic,
+  mod5.aic = summary(mod5)$aic,
+  mod6.aic = summary(mod6)$aic
+)
+
+
+#par(mfrow =c(2,2))
+#plot(lr.full.logit.fit, which=c(1,2), main = "lr1 logit")
+#plot(brglm.fit, which=c(1,2), main = "brglm logit")
+
+
+#anova(lr.full.logit.fit, lr4.probit.fit, test="Chisq")
+#anova(lr.full.logit.fit, test="Chisq") #sequential analysis of deviance test => compare intercept model with models with added variables (nested) => DEPENDS ON ORDER OF THE VARIABLES, IN GLM FORMULA
+
+#compare models with deviance (LRT): NESTED MODELS p.114 => stepwise selection, start from full or null model
+#pchisq(cps.fit1$null.dev-cps.fit1$dev,
+#       df=cps.fit1$df.null-cps.fit1$df.res,
+#       lower.tail=F)
+```
+
+### Model p-values
+```{r, echo=F}
+data.frame(
+  mod1 = mod1.p,
+  mod2 = mod2.p,
+  mod3 = mod3.p,
+  mod4 = mod4.p,
+  mod5 = mod5.p,
+  mod6 = mod6.p
+)
+```
+
+## Residuals and Model Checking of Final Model (Model 5)
+```{r, echo=F, fig.height=2.5, fig.width=7}
+final.mod <- mod5
+# RESIDUAL ANALYSIS p.98!!!!!!!
+par(mfrow = c(2, 2), mar=c(1, 2, 1, 1) + 0.1)
+plot(final.mod) # obs 7, 44 influential
+```
+
+### Pearson/Deviance residuals
+```{r, echo=F, fig.height=2.5, fig.width=7}
+par(mfrow = c(2, 2), mar=c(1, 2, 1, 1) + 0.1, xpd=NA)
+plot(predict(final.mod), residuals(final.mod, type="pearson"), ylab="pearson resids", xlab="fitted values")
+plot(predict(final.mod), residuals(final.mod, type="deviance"), ylab="deviance resids", xlab="fitted values")
+plot(sort(predict(final.mod)), sort(residuals(final.mod, type="pearson")), ylab="pearson resids", xlab="fitted values")
+plot(sort(predict(final.mod)), sort(residuals(final.mod, type="deviance")), ylab="deviance resids", xlab="fitted values")
+```
+
+### Randomized quantile residuals
+```{r, echo=F, fig.height=3, fig.width=6}
+#Randomized quantile residuals
+par(mfrow=c(1,1))
+rqresid.final.mod <- qresid(final.mod)
+qqnorm(rqresid.final.mod)
+qqline(rqresid.final.mod)
+```
+
+### Residuals vs covariates
+```{r, echo=F, fig.height=4, fig.width=10}
+#Residuals vs covariates
+final.mod.res <- residuals(final.mod,type='deviance')
+
+par(mfrow = c(2, 2), mar=c(1, 2, 1, 1) + 0.1, xpd=NA)
+plot(jitter(orange$pH), final.mod.res, main = "pH")
+abline(h=0, lty = 2)
+lines(smooth.spline(orange$pH, final.mod.res),col='limegreen',lwd=2)
+
+plot(jitter(orange$LL), final.mod.res, main = "LL") 
+lines(smooth.spline(orange$LL, final.mod.res,df=4),col='limegreen',lwd=2)
+abline(h=0, lty = 2)
+
+plot(jitter(orange$Temp), final.mod.res, main = "Temp") 
+lines(smooth.spline(orange$Temp, final.mod.res,df=4),col='limegreen',lwd=2)
+abline(h=0, lty = 2)
+
+plot(jitter(orange$Brix), final.mod.res, main = "Brix") 
+lines(smooth.spline(orange$Brix, final.mod.res,df=4),col='limegreen',lwd=2)
+abline(h=0, lty = 2)
+```
+
+## Interpretation
+
+```{r, echo=F, eval=T, fig.height=3, fig.width=5}
+pH.grid = round(seq(min(orange$pH), max(orange$pH), length.out=5), 2)
+
+LL.grid = round(seq(min(orange$LL), max(orange$LL), length.out=5), 2)
+
+Brix.grid = round(seq(min(orange$Brix), max(orange$Brix), length.out=5), 2)
+
+Temp.grid = round(seq(min(orange$Temp), max(orange$Temp), length.out=5), 2)
+
+#TEMP FIXED
+# PROBABILITY TABLE: Temp=25
+grid <- expand.grid(pH=pH.grid, LL=LL.grid, Temp=25)
+table1 <- round(matrix(predict(mod3, newdata=grid, type="response"), nrow=5, ncol=5), 2)
+colnames(table1) <- paste("pH", pH.grid, collape=" ")
+rownames(table1) <- paste("LL", LL.grid, collape=" ")
+#kable(table, caption="temp=25")
+
+# PROBABILITY TABLE: Temp=35
+grid <- expand.grid(pH=pH.grid, LL=LL.grid, Temp=43)
+table2 <- round(matrix(predict(mod3, newdata=grid, type="response"), nrow=5, ncol=5), 2)
+colnames(table2) <- paste("pH", pH.grid, collape=" ")
+rownames(table2) <- paste("LL", LL.grid, collape=" ")
+#kable(table, caption="temp=35")
+kable(cbind(table1, table2), caption="Temp=25 and Temp=35")
+
+# PROBABILITY TABLE: Temp=43
+grid <- expand.grid(pH=pH.grid, LL=LL.grid, Temp=43)
+table5 <- round(matrix(predict(mod3, newdata=grid, type="response"), nrow=5, ncol=5), 4)
+colnames(table5) <- paste("pH", pH.grid, collape=" ")
+rownames(table5) <- paste("LL", LL.grid, collape=" ")
+#kable(table, caption="LL=0")
+
+# PROBABILITY TABLE: Temp=50
+grid <- expand.grid(pH=pH.grid, LL=LL.grid, Temp=50)
+table6 <- round(matrix(predict(mod3, newdata=grid, type="response"), nrow=5, ncol=5), 4)
+colnames(table6) <- paste("pH", pH.grid, collape=" ")
+rownames(table6) <- paste("LL", LL.grid, collape=" ")
+#kable(table, caption="LL=30")
+kable(cbind(table5, table6), caption="Temp=43 and Temp=50")
+```
